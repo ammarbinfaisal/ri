@@ -116,8 +116,7 @@ impl EditorConfig {
 }
 
 fn main() {
-    let old_termios = enable_raw_mode();
-    let old_termios = match old_termios {
+    let old_termios = match enable_raw_mode() {
         Ok(t) => t,
         Err(e) => {
             println!("error: {:?}", e);
