@@ -9,6 +9,7 @@ use rustix::{
     stdio,
     termios::tcgetwinsize,
 };
+use std::cmp::{min, max};
 
 #[derive(PartialEq, Debug)]
 enum EditorMode {
@@ -21,12 +22,13 @@ enum EditorMode {
 struct EditorConfig<'a> {
     cx: usize,
     cy: usize,
+    max_x: usize,
     screenrows: u16,
     screencols: u16,
     stdout: BorrowedFd<'a>,
     stdin: BorrowedFd<'a>,
-    rowoff: usize,
-    coloff: usize,
+    rowoff: u16,
+    coloff: u16,
     rows: Vec<String>,
     cmd: String,
     cmdix: usize,
@@ -47,18 +49,21 @@ enum EditorKey {
     K(u8),
 }
 
+const CX_INIT: usize = 4;
+
 impl<'editor> EditorConfig<'editor> {
-    fn new() -> Self {
+    fn new(contents: &str) -> Self {
         Self {
-            cx: 0,
-            cy: 0,
+            cx: CX_INIT,
+            cy: 1,
+            max_x: CX_INIT,
             screenrows: 0,
             screencols: 0,
             stdout: stdio::stdout(),
             stdin: stdio::stdin(),
             mode: EditorMode::Normal,
             cmd: String::new(),
-            rows: Vec::new(),
+            rows: contents.split("\n").map(|s| s.to_string()).collect(),
             rowoff: 0,
             coloff: 0,
             cmdix: 0,
@@ -85,25 +90,28 @@ impl<'editor> EditorConfig<'editor> {
         buf.push_str("\x1b[?25l");
         buf.push_str("\x1b[H");
         let row_count = self.rows.len() as u16;
-        for i in 0..self.screenrows {
-            buf.push_str("~");
+        for i in self.rowoff..self.screenrows {
+            buf.push_str(format!("{:2} ", i + 1).as_str());
             buf.push_str("\x1b[K");
             if i < self.screenrows - 1 {
                 if i < row_count {
-                    buf.push_str(&self.rows[i as usize][..self.screencols as usize]);
+                    let row = self.rows[i as usize].clone();
+                    if (self.coloff as usize) < row.len() {
+                        buf.push_str(&row[self.coloff as usize..]);
+                    }
                 }
                 buf.push_str("\r\n");
             }
         }
         buf.push_str("\x1b[H");
         buf.push_str("\x1b[?25h");
-        if self.mode == EditorMode::Normal {
+        if self.mode == EditorMode::Normal || self.mode == EditorMode::Insert {
             buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
         } else if self.mode == EditorMode::Command {
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
             buf.push_str("\x1b[K: ");
             buf.push_str(&self.cmd);
-            buf.push_str(&format!("\x1b[{};{}H", self.screenrows, self.cmdix+3,));
+            buf.push_str(&format!("\x1b[{};{}H", self.screenrows, self.cmdix + 3,));
         }
         io::write(self.stdout, buf.as_bytes()).unwrap();
     }
@@ -112,8 +120,8 @@ impl<'editor> EditorConfig<'editor> {
         io::write(self.stdout, "\x1b[999C\x1b[999B".as_bytes()).unwrap();
         let mut buf = [0u8; 32];
         io::read(self.stdin, &mut buf).unwrap();
-        let mut cx = 0;
-        let mut cy = 0;
+        let mut cx = CX_INIT;
+        let mut cy = 1;
         let mut i = 0;
         while i < buf.len() {
             if buf[i] == b'R' {
@@ -189,6 +197,28 @@ impl<'editor> EditorConfig<'editor> {
         }
     }
 
+    fn curr_right_limit(&self) -> usize {
+        let lim = if self.mode == EditorMode::Insert {
+            0 as i64
+        } else {
+            -1
+        };
+        let res = (min(self.screencols as usize, self.rows[self.cy - 1].len())) as i64 + lim;
+        if res < 0 {
+            0
+        } else {
+            res as usize
+        }
+    }
+
+    fn set_cx(&mut self) {
+        if self.cx < self.curr_right_limit() + CX_INIT {
+            self.cx = self.max_x;
+        } else {
+            self.cx = self.curr_right_limit() + CX_INIT;
+        }
+    }
+
     fn run<'a>(&mut self) -> Result<(), Errno> {
         // open a log file
         let mut file = File::create("log").unwrap();
@@ -201,8 +231,9 @@ impl<'editor> EditorConfig<'editor> {
                     match key {
                         EditorKey::ArrowLeft => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                if self.cx != 0 {
+                                if self.cx != CX_INIT {
                                     self.cx -= 1;
+                                    self.max_x = self.cx;
                                 }
                             }
                             EditorMode::Command => {
@@ -213,9 +244,12 @@ impl<'editor> EditorConfig<'editor> {
                         },
                         EditorKey::ArrowRight => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                if self.cx != self.screencols as usize - 1 {
+                                if self.cx - CX_INIT < self.curr_right_limit() {
                                     self.cx += 1;
+                                } else {
+                                    self.cx = self.curr_right_limit() + CX_INIT;
                                 }
+                                self.max_x = max(self.max_x, self.cx);
                             }
                             EditorMode::Command => {
                                 if self.cmdix != self.cmd.len() {
@@ -223,41 +257,59 @@ impl<'editor> EditorConfig<'editor> {
                                 }
                             }
                         },
-                        EditorKey::ArrowUp => {
-                            if self.mode == EditorMode::Normal && self.cy != 0 {
-                                self.cy -= 1;
-                            }
-                        }
-                        EditorKey::ArrowDown => {
-                            if self.mode == EditorMode::Normal
-                                && self.cy != self.screenrows as usize - 1
-                            {
-                                self.cy += 1;
-                            }
-                        }
-                        EditorKey::DelKey => match self.mode {
-                            EditorMode::Normal => {
-                                if self.cx != 0 {
-                                    self.rows[self.cy].remove(self.cx - 1);
-                                    self.cx -= 1;
+                        EditorKey::ArrowUp => match self.mode {
+                            EditorMode::Normal | EditorMode::Insert => {
+                                if self.cy != 1 {
+                                    self.cy -= 1;
                                 }
+                                self.set_cx();
                             }
-                            EditorMode::Insert => {
-                                if self.cx != 0 {
-                                    self.rows[self.cy].remove(self.cx - 1);
+                            EditorMode::Command => {}
+                        },
+                        EditorKey::ArrowDown => match self.mode {
+                            EditorMode::Normal | EditorMode::Insert => {
+                                if self.cy != self.screenrows as usize - 1 {
+                                    self.cy += 1;
+                                }
+                                self.set_cx();
+                            }
+                            EditorMode::Command => {}
+                        },
+                        EditorKey::DelKey => match self.mode {
+                            EditorMode::Insert | EditorMode::Normal => {
+                                // handles the case where the cursor is at the end of the line
+                                // if mode is insert, the cursor is can be past the last character
+                                // if mode is normal, the cursor is always on a character
+                                if (self.cx - CX_INIT) == self.curr_right_limit() {
+                                    self.rows[self.cy - 1].pop();
                                     self.cx -= 1;
+                                } else {
+                                    self.rows[self.cy - 1].remove(self.cx - CX_INIT);
                                 }
                             }
                             EditorMode::Command => {}
                         },
                         EditorKey::HomeKey => {
-                            self.cx = 0;
+                            self.cx = CX_INIT;
                         }
                         EditorKey::EndKey => {
-                            self.cx = self.screencols as usize - 1;
+                            self.cx = self.curr_right_limit() + CX_INIT;
                         }
-                        EditorKey::PageUp => {}
-                        EditorKey::PageDown => {}
+                        EditorKey::PageUp => {
+                            if self.cy > self.screenrows as usize {
+                                self.cy -= self.screenrows as usize;
+                            } else {
+                                self.cy = 1;
+                            }
+                        }
+                        EditorKey::PageDown => {
+                            // TODO: support scrolling
+                            if (self.cy + self.screenrows as usize) < self.rows.len() {
+                                self.cy += self.screenrows as usize;
+                            } else {
+                                self.cy = self.rows.len();
+                            }
+                        }
                         EditorKey::K(c) => match self.mode {
                             EditorMode::Normal => match c {
                                 b'i' => {
@@ -273,7 +325,11 @@ impl<'editor> EditorConfig<'editor> {
                                     self.mode = EditorMode::Normal;
                                 }
                                 _ => {
-                                    self.rows[self.cy].insert(self.cx, c as char);
+                                    if c > 31 && c < 127 {
+                                        self.rows[self.cy - 1].insert(self.cx - CX_INIT, c as char);
+                                        self.cx += 1;
+                                        self.max_x = max(self.max_x, self.cx);
+                                    }
                                 }
                             },
                             EditorMode::Command => match c {
@@ -320,6 +376,12 @@ impl<'editor> EditorConfig<'editor> {
 }
 
 fn main() {
+    let arg = std::env::args().nth(1);
+    let file = if let Some(arg) = arg {
+        arg
+    } else {
+        return;
+    };
     let old_termios = match enable_raw_mode() {
         Ok(t) => t,
         Err(e) => {
@@ -327,7 +389,8 @@ fn main() {
             exit(1);
         }
     };
-    let mut editor = EditorConfig::new();
+    let contents = std::fs::read_to_string(file).unwrap();
+    let mut editor = EditorConfig::new(&contents);
     loop {
         let res = editor.run();
         disable_raw_mode(&old_termios);
