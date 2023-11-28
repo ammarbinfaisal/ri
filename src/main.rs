@@ -16,7 +16,8 @@ struct EditorConfig<'a> {
     cy: usize,
     screenrows: u16,
     screencols: u16,
-    stdout: BorrowedFd<'a>
+    stdout: BorrowedFd<'a>,
+    stdin: BorrowedFd<'a>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -41,14 +42,21 @@ impl<'editor> EditorConfig<'editor> {
             screenrows: 0,
             screencols: 0,
             stdout: stdio::stdout(),
+            stdin: stdio::stdin(),
         }
     }
 
     fn set_size(&mut self) {
+        let prev = (self.screenrows, self.screencols);
         let winsize = tcgetwinsize(self.stdout);
         if let Ok(winsize) = winsize {
-            self.screenrows = winsize.ws_row;
-            self.screencols = winsize.ws_col;
+            if winsize.ws_row != 0 && winsize.ws_col != 0 {
+                self.screenrows = winsize.ws_row;
+                self.screencols = winsize.ws_col;
+            }
+            if prev != (self.screenrows, self.screencols) {
+                self.get_cursor_position().unwrap();
+            }
         }
     }
 
@@ -71,63 +79,52 @@ impl<'editor> EditorConfig<'editor> {
         io::write(self.stdout, buf.as_bytes()).unwrap();
     }
 
-    fn get_cursor_position<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<(), Errno> {
+    fn get_cursor_position(&mut self) -> Result<(), Errno> {
+        io::write(self.stdout, "\x1b[999C\x1b[999B".as_bytes()).unwrap();
         let mut buf = [0u8; 32];
+        io::read(self.stdin, &mut buf).unwrap();
+        let mut cx = 0;
+        let mut cy = 0;
         let mut i = 0;
-        let mut rows = 0;
-        let mut cols = 0;
-        io::write(self.stdout, b"\x1b[6n")?;
-        let n = io::read(fd, &mut buf)?;
-        while i < n {
+        while i < buf.len() {
             if buf[i] == b'R' {
                 break;
             }
             i += 1;
         }
-        if i == n {
-            return Err(Errno::IO);
-        }
         i += 1;
-        while i < n {
-            if buf[i].is_ascii_digit() {
-                rows = rows * 10 + (buf[i] - b'0') as usize;
-            } else {
-                break;
-            }
-            i += 1;
-        }
-        while i < n {
+        while i < buf.len() {
             if buf[i] == b';' {
                 break;
             }
+            cx = cx * 10 + (buf[i] - b'0') as usize;
             i += 1;
         }
         i += 1;
-        while i < n {
-            if buf[i].is_ascii_digit() {
-                cols = cols * 10 + (buf[i] - b'0') as usize;
-            } else {
+        while i < buf.len() {
+            if buf[i] == b'R' {
                 break;
             }
+            cy = cy * 10 + (buf[i] - b'0') as usize;
             i += 1;
         }
-        self.cx = cols;
-        self.cy = rows;
+        self.cx = cx;
+        self.cy = cy;
         Ok(())
     }
 
-    fn read_key<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<u8, Errno> {
+    fn read_key<'a>(&mut self) -> Result<u8, Errno> {
         let mut buf = [0u8; 1];
-        io::read(fd, &mut buf)?;
+        io::read(self.stdin, &mut buf)?;
         Ok(buf[0])
     }
 
-    fn read_editor_key<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<EditorKey, Errno> {
-        let c = self.read_key(fd)?;
+    fn read_editor_key<'a>(&mut self) -> Result<EditorKey, Errno> {
+        let c = self.read_key()?;
         match c {
             b'\x1b' => {
                 let mut buf = [0u8; 3];
-                io::read(fd, &mut buf)?;
+                io::read(self.stdin, &mut buf)?;
                 match buf[0] {
                     b'[' => match buf[1] {
                         b'D' => Ok(EditorKey::ArrowLeft),
@@ -163,13 +160,12 @@ impl<'editor> EditorConfig<'editor> {
         }
     }
 
-    fn run<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<(), Errno> {
+    fn run<'a>(&mut self) -> Result<(), Errno> {
         // open a log file
         let mut file = File::create("log").unwrap();
         loop {
-            self.get_cursor_position(fd)?;
             self.refresh_screen();
-            match self.read_editor_key(fd) {
+            match self.read_editor_key() {
                 Ok(key) => {
                     file.write_all(&format!("{:?}\n", key).as_bytes()).unwrap();
                     file.flush().unwrap();
@@ -220,7 +216,7 @@ impl<'editor> EditorConfig<'editor> {
 }
 
 fn main() {
-    let (old_termios, fd) = match enable_raw_mode() {
+    let old_termios = match enable_raw_mode() {
         Ok(t) => t,
         Err(e) => {
             println!("error: {:?}", e);
@@ -228,11 +224,15 @@ fn main() {
         }
     };
     let mut editor = EditorConfig::new();
-    match editor.run(fd) {
-        Ok(_) => {}
-        Err(e) => {
-            println!("error: {:?}", e);
+    loop {
+        let res = editor.run();
+        disable_raw_mode(&old_termios);
+        match res {
+            Err(e) => {
+                println!("error: {:?}", e);
+            }
+            _ => {}
         }
+        break;
     }
-    disable_raw_mode(&old_termios, fd);
 }
