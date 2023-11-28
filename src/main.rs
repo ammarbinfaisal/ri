@@ -1,6 +1,6 @@
 mod raw;
 
-use std::process::exit;
+use std::{process::exit, fs::File, io::Write};
 
 use raw::*;
 use rustix::{
@@ -9,14 +9,19 @@ use rustix::{
     termios::tcgetwinsize,
 };
 
+#[derive(Debug)]
 struct EditorConfig {
     cx: usize,
     cy: usize,
     screenrows: u16,
     screencols: u16,
+    rowoff: usize,
+    coloff: usize,
+    numrows: usize,
+    row: Vec<String>,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum EditorKey {
     ArrowLeft,
     ArrowRight,
@@ -37,6 +42,10 @@ impl EditorConfig {
             cy: 0,
             screenrows: 0,
             screencols: 0,
+            rowoff: 0,
+            coloff: 0,
+            numrows: 0,
+            row: Vec::new(),
         }
     }
 
@@ -121,13 +130,14 @@ impl EditorConfig {
 
     fn read_editor_key(&mut self) -> Result<EditorKey, Errno> {
         let c = self.read_key()?;
+        let fd = stdio::stdin();
         match c {
             b'\x1b' => {
-                let c = self.read_key()?;
-                match c {
+                let mut buf = [0u8; 3];
+                io::read(fd, &mut buf)?;
+                match buf[0] {
                     b'[' => {
-                        let c = self.read_key()?;
-                        match c {
+                        match buf[1] {
                             b'D' => Ok(EditorKey::ArrowLeft),
                             b'C' => Ok(EditorKey::ArrowRight),
                             b'A' => Ok(EditorKey::ArrowUp),
@@ -135,9 +145,8 @@ impl EditorConfig {
                             b'H' => Ok(EditorKey::HomeKey),
                             b'F' => Ok(EditorKey::EndKey),
                             b'1'..=b'8' => {
-                                let c = self.read_key()?;
-                                match c {
-                                    b'~' => match c {
+                                match buf[2] {
+                                    b'~' => match buf[1] {
                                         b'1' => Ok(EditorKey::HomeKey),
                                         b'3' => Ok(EditorKey::DelKey),
                                         b'4' => Ok(EditorKey::EndKey),
@@ -154,8 +163,7 @@ impl EditorConfig {
                         }
                     }
                     b'O' => {
-                        let c = self.read_key()?;
-                        match c {
+                        match buf[1] {
                             b'H' => Ok(EditorKey::HomeKey),
                             b'F' => Ok(EditorKey::EndKey),
                             _ => Ok(EditorKey::K(c)),
@@ -169,41 +177,54 @@ impl EditorConfig {
     }
 
     fn run(&mut self) -> Result<(), Errno> {
+        // open a log file
+        let mut file = File::create("log").unwrap();
         loop {
             clear_screen();
             self.get_cursor_position()?;
             self.refresh_screen();
             match self.read_editor_key() {
-                Ok(EditorKey::ArrowLeft) => {
-                    if self.cx != 1 {
-                        self.cx -= 1;
+                Ok(key) => {
+                    file.write_all(&format!("{:?}\n", key).as_bytes()).unwrap();
+                    file.flush().unwrap();
+                    match key {
+                        EditorKey::ArrowLeft => {
+                            if self.cx != 0 {
+                                self.cx -= 1;
+                            }
+                        }
+                        EditorKey::ArrowRight => {
+                            if self.cx != self.screencols as usize - 1 {
+                                self.cx += 1;
+                            }
+                        }
+                        EditorKey::ArrowUp => {
+                            if self.cy != 0 {
+                                self.cy -= 1;
+                            }
+                        }
+                        EditorKey::ArrowDown => {
+                            if self.cy != self.screenrows as usize - 1 {
+                                self.cy += 1;
+                            }
+                        }
+                        EditorKey::DelKey => {}
+                        EditorKey::HomeKey => {
+                            self.cx = 0;
+                        }
+                        EditorKey::EndKey => {
+                            self.cx = self.screencols as usize - 1;
+                        }
+                        EditorKey::PageUp => {}
+                        EditorKey::PageDown => {}
+                        EditorKey::K(c) => {
+                            if c == b'q' {
+                                clear_screen();
+                                return Ok(());
+                            }
+                        }
                     }
                 }
-                Ok(EditorKey::ArrowRight) => {
-                    if self.cx != self.screencols as usize {
-                        self.cx += 1;
-                    }
-                }
-                Ok(EditorKey::ArrowUp) => {
-                    if self.cy != 1 {
-                        self.cy -= 1;
-                    }
-                }
-                Ok(EditorKey::ArrowDown) => {
-                    if self.cy != self.screenrows as usize {
-                        self.cy += 1;
-                    }
-                }
-                Ok(EditorKey::DelKey) => {}
-                Ok(EditorKey::HomeKey) => {
-                    self.cx = 1;
-                }
-                Ok(EditorKey::EndKey) => {
-                    self.cx = self.screencols as usize;
-                }
-                Ok(EditorKey::PageUp) => {}
-                Ok(EditorKey::PageDown) => {}
-                Ok(EditorKey::K(_)) => {}
                 Err(e) => {
                     return Err(e);
                 }
