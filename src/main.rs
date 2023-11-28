@@ -11,11 +11,12 @@ use rustix::{
 };
 
 #[derive(Debug)]
-struct EditorConfig {
+struct EditorConfig<'a> {
     cx: usize,
     cy: usize,
     screenrows: u16,
     screencols: u16,
+    stdout: BorrowedFd<'a>
 }
 
 #[derive(PartialEq, Debug)]
@@ -32,18 +33,19 @@ enum EditorKey {
     K(u8),
 }
 
-impl EditorConfig {
+impl<'editor> EditorConfig<'editor> {
     fn new() -> Self {
         Self {
             cx: 0,
             cy: 0,
             screenrows: 0,
             screencols: 0,
+            stdout: stdio::stdout(),
         }
     }
 
     fn set_size(&mut self) {
-        let winsize = tcgetwinsize(stdio::stdout());
+        let winsize = tcgetwinsize(self.stdout);
         if let Ok(winsize) = winsize {
             self.screenrows = winsize.ws_row;
             self.screencols = winsize.ws_col;
@@ -66,8 +68,7 @@ impl EditorConfig {
         buf.push_str("\x1b[?25h");
         // put cursor
         buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
-        buf.push_str("\x1b[?25h");
-        io::write(stdio::stdout(), buf.as_bytes()).unwrap();
+        io::write(self.stdout, buf.as_bytes()).unwrap();
     }
 
     fn get_cursor_position<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<(), Errno> {
@@ -75,7 +76,7 @@ impl EditorConfig {
         let mut i = 0;
         let mut rows = 0;
         let mut cols = 0;
-        io::write(stdio::stdout(), b"\x1b[6n")?;
+        io::write(self.stdout, b"\x1b[6n")?;
         let n = io::read(fd, &mut buf)?;
         while i < n {
             if buf[i] == b'R' {
