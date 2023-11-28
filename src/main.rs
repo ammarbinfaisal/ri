@@ -1,9 +1,10 @@
 mod raw;
 
-use std::{process::exit, fs::File, io::Write};
+use std::{fs::File, io::Write, process::exit};
 
 use raw::*;
 use rustix::{
+    fd::BorrowedFd,
     io::{self, Errno},
     stdio,
     termios::tcgetwinsize,
@@ -15,10 +16,6 @@ struct EditorConfig {
     cy: usize,
     screenrows: u16,
     screencols: u16,
-    rowoff: usize,
-    coloff: usize,
-    numrows: usize,
-    row: Vec<String>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -42,10 +39,6 @@ impl EditorConfig {
             cy: 0,
             screenrows: 0,
             screencols: 0,
-            rowoff: 0,
-            coloff: 0,
-            numrows: 0,
-            row: Vec::new(),
         }
     }
 
@@ -77,13 +70,13 @@ impl EditorConfig {
         io::write(stdio::stdout(), buf.as_bytes()).unwrap();
     }
 
-    fn get_cursor_position(&mut self) -> Result<(), Errno> {
+    fn get_cursor_position<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<(), Errno> {
         let mut buf = [0u8; 32];
         let mut i = 0;
         let mut rows = 0;
         let mut cols = 0;
         io::write(stdio::stdout(), b"\x1b[6n")?;
-        let n = io::read(stdio::stdin(), &mut buf)?;
+        let n = io::read(fd, &mut buf)?;
         while i < n {
             if buf[i] == b'R' {
                 break;
@@ -122,53 +115,46 @@ impl EditorConfig {
         Ok(())
     }
 
-    fn read_key(&mut self) -> Result<u8, Errno> {
+    fn read_key<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<u8, Errno> {
         let mut buf = [0u8; 1];
-        io::read(stdio::stdin(), &mut buf)?;
+        io::read(fd, &mut buf)?;
         Ok(buf[0])
     }
 
-    fn read_editor_key(&mut self) -> Result<EditorKey, Errno> {
-        let c = self.read_key()?;
-        let fd = stdio::stdin();
+    fn read_editor_key<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<EditorKey, Errno> {
+        let c = self.read_key(fd)?;
         match c {
             b'\x1b' => {
                 let mut buf = [0u8; 3];
                 io::read(fd, &mut buf)?;
                 match buf[0] {
-                    b'[' => {
-                        match buf[1] {
-                            b'D' => Ok(EditorKey::ArrowLeft),
-                            b'C' => Ok(EditorKey::ArrowRight),
-                            b'A' => Ok(EditorKey::ArrowUp),
-                            b'B' => Ok(EditorKey::ArrowDown),
-                            b'H' => Ok(EditorKey::HomeKey),
-                            b'F' => Ok(EditorKey::EndKey),
-                            b'1'..=b'8' => {
-                                match buf[2] {
-                                    b'~' => match buf[1] {
-                                        b'1' => Ok(EditorKey::HomeKey),
-                                        b'3' => Ok(EditorKey::DelKey),
-                                        b'4' => Ok(EditorKey::EndKey),
-                                        b'5' => Ok(EditorKey::PageUp),
-                                        b'6' => Ok(EditorKey::PageDown),
-                                        b'7' => Ok(EditorKey::HomeKey),
-                                        b'8' => Ok(EditorKey::EndKey),
-                                        _ => Ok(EditorKey::K(c)),
-                                    },
-                                    _ => Ok(EditorKey::K(c)),
-                                }
-                            }
+                    b'[' => match buf[1] {
+                        b'D' => Ok(EditorKey::ArrowLeft),
+                        b'C' => Ok(EditorKey::ArrowRight),
+                        b'A' => Ok(EditorKey::ArrowUp),
+                        b'B' => Ok(EditorKey::ArrowDown),
+                        b'H' => Ok(EditorKey::HomeKey),
+                        b'F' => Ok(EditorKey::EndKey),
+                        b'1'..=b'8' => match buf[2] {
+                            b'~' => match buf[1] {
+                                b'1' => Ok(EditorKey::HomeKey),
+                                b'3' => Ok(EditorKey::DelKey),
+                                b'4' => Ok(EditorKey::EndKey),
+                                b'5' => Ok(EditorKey::PageUp),
+                                b'6' => Ok(EditorKey::PageDown),
+                                b'7' => Ok(EditorKey::HomeKey),
+                                b'8' => Ok(EditorKey::EndKey),
+                                _ => Ok(EditorKey::K(c)),
+                            },
                             _ => Ok(EditorKey::K(c)),
-                        }
-                    }
-                    b'O' => {
-                        match buf[1] {
-                            b'H' => Ok(EditorKey::HomeKey),
-                            b'F' => Ok(EditorKey::EndKey),
-                            _ => Ok(EditorKey::K(c)),
-                        }
-                    }
+                        },
+                        _ => Ok(EditorKey::K(c)),
+                    },
+                    b'O' => match buf[1] {
+                        b'H' => Ok(EditorKey::HomeKey),
+                        b'F' => Ok(EditorKey::EndKey),
+                        _ => Ok(EditorKey::K(c)),
+                    },
                     _ => Ok(EditorKey::K(c)),
                 }
             }
@@ -176,14 +162,13 @@ impl EditorConfig {
         }
     }
 
-    fn run(&mut self) -> Result<(), Errno> {
+    fn run<'a>(&mut self, fd: BorrowedFd<'a>) -> Result<(), Errno> {
         // open a log file
         let mut file = File::create("log").unwrap();
         loop {
-            clear_screen();
-            self.get_cursor_position()?;
+            self.get_cursor_position(fd)?;
             self.refresh_screen();
-            match self.read_editor_key() {
+            match self.read_editor_key(fd) {
                 Ok(key) => {
                     file.write_all(&format!("{:?}\n", key).as_bytes()).unwrap();
                     file.flush().unwrap();
@@ -234,7 +219,7 @@ impl EditorConfig {
 }
 
 fn main() {
-    let old_termios = match enable_raw_mode() {
+    let (old_termios, fd) = match enable_raw_mode() {
         Ok(t) => t,
         Err(e) => {
             println!("error: {:?}", e);
@@ -242,11 +227,11 @@ fn main() {
         }
     };
     let mut editor = EditorConfig::new();
-    match editor.run() {
+    match editor.run(fd) {
         Ok(_) => {}
         Err(e) => {
             println!("error: {:?}", e);
         }
     }
-    disable_raw_mode(&old_termios);
+    disable_raw_mode(&old_termios, fd);
 }
