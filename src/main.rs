@@ -130,9 +130,7 @@ fn main() {
     match editor.run() {
         Ok(_) => {}
         Err(e) => {
-            disable_raw_mode(&old_termios);
             println!("error: {:?}", e);
-            exit(1);
         }
     }
     disable_raw_mode(&old_termios);
