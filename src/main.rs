@@ -10,6 +10,13 @@ use rustix::{
     termios::tcgetwinsize,
 };
 
+#[derive(PartialEq, Debug)]
+enum EditorMode {
+    Normal,
+    Insert,
+    Command,
+}
+
 #[derive(Debug)]
 struct EditorConfig<'a> {
     cx: usize,
@@ -18,6 +25,12 @@ struct EditorConfig<'a> {
     screencols: u16,
     stdout: BorrowedFd<'a>,
     stdin: BorrowedFd<'a>,
+    rowoff: usize,
+    coloff: usize,
+    rows: Vec<String>,
+    cmd: String,
+    cmdix: usize,
+    mode: EditorMode,
 }
 
 #[derive(PartialEq, Debug)]
@@ -43,6 +56,12 @@ impl<'editor> EditorConfig<'editor> {
             screencols: 0,
             stdout: stdio::stdout(),
             stdin: stdio::stdin(),
+            mode: EditorMode::Normal,
+            cmd: String::new(),
+            rows: Vec::new(),
+            rowoff: 0,
+            coloff: 0,
+            cmdix: 0,
         }
     }
 
@@ -65,17 +84,27 @@ impl<'editor> EditorConfig<'editor> {
         let mut buf = String::new();
         buf.push_str("\x1b[?25l");
         buf.push_str("\x1b[H");
+        let row_count = self.rows.len() as u16;
         for i in 0..self.screenrows {
             buf.push_str("~");
             buf.push_str("\x1b[K");
             if i < self.screenrows - 1 {
+                if i < row_count {
+                    buf.push_str(&self.rows[i as usize][..self.screencols as usize]);
+                }
                 buf.push_str("\r\n");
             }
         }
         buf.push_str("\x1b[H");
         buf.push_str("\x1b[?25h");
-        // put cursor
-        buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
+        if self.mode == EditorMode::Normal {
+            buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
+        } else if self.mode == EditorMode::Command {
+            buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
+            buf.push_str("\x1b[K: ");
+            buf.push_str(&self.cmd);
+            buf.push_str(&format!("\x1b[{};{}H", self.screenrows, self.cmdix+3,));
+        }
         io::write(self.stdout, buf.as_bytes()).unwrap();
     }
 
@@ -170,27 +199,57 @@ impl<'editor> EditorConfig<'editor> {
                     file.write_all(&format!("{:?}\n", key).as_bytes()).unwrap();
                     file.flush().unwrap();
                     match key {
-                        EditorKey::ArrowLeft => {
-                            if self.cx != 0 {
-                                self.cx -= 1;
+                        EditorKey::ArrowLeft => match self.mode {
+                            EditorMode::Normal | EditorMode::Insert => {
+                                if self.cx != 0 {
+                                    self.cx -= 1;
+                                }
                             }
-                        }
-                        EditorKey::ArrowRight => {
-                            if self.cx != self.screencols as usize - 1 {
-                                self.cx += 1;
+                            EditorMode::Command => {
+                                if self.cmdix != 0 {
+                                    self.cmdix -= 1;
+                                }
                             }
-                        }
+                        },
+                        EditorKey::ArrowRight => match self.mode {
+                            EditorMode::Normal | EditorMode::Insert => {
+                                if self.cx != self.screencols as usize - 1 {
+                                    self.cx += 1;
+                                }
+                            }
+                            EditorMode::Command => {
+                                if self.cmdix != self.cmd.len() {
+                                    self.cmdix += 1;
+                                }
+                            }
+                        },
                         EditorKey::ArrowUp => {
-                            if self.cy != 0 {
+                            if self.mode == EditorMode::Normal && self.cy != 0 {
                                 self.cy -= 1;
                             }
                         }
                         EditorKey::ArrowDown => {
-                            if self.cy != self.screenrows as usize - 1 {
+                            if self.mode == EditorMode::Normal
+                                && self.cy != self.screenrows as usize - 1
+                            {
                                 self.cy += 1;
                             }
                         }
-                        EditorKey::DelKey => {}
+                        EditorKey::DelKey => match self.mode {
+                            EditorMode::Normal => {
+                                if self.cx != 0 {
+                                    self.rows[self.cy].remove(self.cx - 1);
+                                    self.cx -= 1;
+                                }
+                            }
+                            EditorMode::Insert => {
+                                if self.cx != 0 {
+                                    self.rows[self.cy].remove(self.cx - 1);
+                                    self.cx -= 1;
+                                }
+                            }
+                            EditorMode::Command => {}
+                        },
                         EditorKey::HomeKey => {
                             self.cx = 0;
                         }
@@ -199,12 +258,57 @@ impl<'editor> EditorConfig<'editor> {
                         }
                         EditorKey::PageUp => {}
                         EditorKey::PageDown => {}
-                        EditorKey::K(c) => {
-                            if c == b'q' {
-                                clear_screen();
-                                return Ok(());
-                            }
-                        }
+                        EditorKey::K(c) => match self.mode {
+                            EditorMode::Normal => match c {
+                                b'i' => {
+                                    self.mode = EditorMode::Insert;
+                                }
+                                b':' => {
+                                    self.mode = EditorMode::Command;
+                                }
+                                _ => {}
+                            },
+                            EditorMode::Insert => match c {
+                                b'\x1b' => {
+                                    self.mode = EditorMode::Normal;
+                                }
+                                _ => {
+                                    self.rows[self.cy].insert(self.cx, c as char);
+                                }
+                            },
+                            EditorMode::Command => match c {
+                                b'\x1b' => {
+                                    self.mode = EditorMode::Normal;
+                                }
+                                b'\r' => {
+                                    self.mode = EditorMode::Normal;
+                                    match self.cmd.as_str() {
+                                        "q" => {
+                                            return Ok(());
+                                        }
+                                        _ => {}
+                                    }
+                                    self.cmd.clear();
+                                    self.cmdix = 0;
+                                }
+                                b'\x7f' => {
+                                    if self.cmdix != 0 {
+                                        self.cmd.remove(self.cmdix - 1);
+                                        self.cmdix -= 1;
+                                    }
+                                }
+                                _ => {
+                                    if c > 31 && c < 127 {
+                                        if self.cmdix == self.cmd.len() {
+                                            self.cmd.push(c as char);
+                                        } else {
+                                            self.cmd.insert(self.cmdix, c as char);
+                                        }
+                                        self.cmdix += 1;
+                                    }
+                                }
+                            },
+                        },
                     }
                 }
                 Err(e) => {
