@@ -1,8 +1,5 @@
-use rustix::{
-    io::{self, Errno},
-    stdio,
-    termios::*,
-};
+use std::ops::IndexMut;
+use rustix::{io::Errno, stdio, termios::*};
 
 pub fn enable_raw_mode() -> Result<Termios, Errno> {
     let fd = stdio::stdin();
@@ -17,8 +14,8 @@ pub fn enable_raw_mode() -> Result<Termios, Errno> {
     raw.control_modes |= ControlModes::CS8;
     raw.local_modes &=
         !(LocalModes::ECHO | LocalModes::ICANON | LocalModes::IEXTEN | LocalModes::ISIG);
-    raw.set_input_speed(0)?;
-    raw.set_output_speed(0)?;
+    *raw.special_codes.index_mut(SpecialCodeIndex::VMIN) = 0;
+    *raw.special_codes.index_mut(SpecialCodeIndex::VTIME) = 1;
     tcsetattr(fd, OptionalActions::Flush, &raw)?;
     Ok(orig_termios)
 }
