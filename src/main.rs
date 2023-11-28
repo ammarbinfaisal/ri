@@ -5,7 +5,8 @@ use std::process::exit;
 use raw::*;
 use rustix::{
     io::{self, Errno},
-    stdio, termios::{tcgetwinsize},
+    stdio,
+    termios::tcgetwinsize,
 };
 
 struct EditorConfig {
@@ -38,8 +39,12 @@ impl EditorConfig {
         let mut buf = String::new();
         buf.push_str("\x1b[?25l");
         buf.push_str("\x1b[H");
-        for _ in 0..self.screenrows {
-            buf.push_str("~\r\n");
+        for i in 0..self.screenrows {
+            buf.push_str("~");
+            buf.push_str("\x1b[K");
+            if i < self.screenrows - 1 {
+                buf.push_str("\r\n");
+            }
         }
         buf.push_str("\x1b[H");
         buf.push_str("\x1b[?25h");
@@ -97,18 +102,11 @@ impl EditorConfig {
         Ok(buf[0])
     }
 
-    fn editor_draw_rows(&mut self) {
-        for _ in 0..self.screenrows {
-            io::write(stdio::stdout(), b"~\r\n").unwrap();
-        }
-    }
-
     fn run(&mut self) -> Result<(), Errno> {
         loop {
             clear_screen();
             self.get_cursor_position()?;
             self.refresh_screen();
-            self.editor_draw_rows();
             let c = self.read_key()?;
             if c == b'\x1b' {
                 break Ok(());
