@@ -16,6 +16,20 @@ struct EditorConfig {
     screencols: u16,
 }
 
+#[derive(PartialEq)]
+enum EditorKey {
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
+    DelKey,
+    HomeKey,
+    EndKey,
+    PageUp,
+    PageDown,
+    K(u8),
+}
+
 impl EditorConfig {
     fn new() -> Self {
         Self {
@@ -47,6 +61,9 @@ impl EditorConfig {
             }
         }
         buf.push_str("\x1b[H");
+        buf.push_str("\x1b[?25h");
+        // put cursor
+        buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
         buf.push_str("\x1b[?25h");
         io::write(stdio::stdout(), buf.as_bytes()).unwrap();
     }
@@ -102,14 +119,94 @@ impl EditorConfig {
         Ok(buf[0])
     }
 
+    fn read_editor_key(&mut self) -> Result<EditorKey, Errno> {
+        let c = self.read_key()?;
+        match c {
+            b'\x1b' => {
+                let c = self.read_key()?;
+                match c {
+                    b'[' => {
+                        let c = self.read_key()?;
+                        match c {
+                            b'D' => Ok(EditorKey::ArrowLeft),
+                            b'C' => Ok(EditorKey::ArrowRight),
+                            b'A' => Ok(EditorKey::ArrowUp),
+                            b'B' => Ok(EditorKey::ArrowDown),
+                            b'H' => Ok(EditorKey::HomeKey),
+                            b'F' => Ok(EditorKey::EndKey),
+                            b'1'..=b'8' => {
+                                let c = self.read_key()?;
+                                match c {
+                                    b'~' => match c {
+                                        b'1' => Ok(EditorKey::HomeKey),
+                                        b'3' => Ok(EditorKey::DelKey),
+                                        b'4' => Ok(EditorKey::EndKey),
+                                        b'5' => Ok(EditorKey::PageUp),
+                                        b'6' => Ok(EditorKey::PageDown),
+                                        b'7' => Ok(EditorKey::HomeKey),
+                                        b'8' => Ok(EditorKey::EndKey),
+                                        _ => Ok(EditorKey::K(c)),
+                                    },
+                                    _ => Ok(EditorKey::K(c)),
+                                }
+                            }
+                            _ => Ok(EditorKey::K(c)),
+                        }
+                    }
+                    b'O' => {
+                        let c = self.read_key()?;
+                        match c {
+                            b'H' => Ok(EditorKey::HomeKey),
+                            b'F' => Ok(EditorKey::EndKey),
+                            _ => Ok(EditorKey::K(c)),
+                        }
+                    }
+                    _ => Ok(EditorKey::K(c)),
+                }
+            }
+            _ => Ok(EditorKey::K(c)),
+        }
+    }
+
     fn run(&mut self) -> Result<(), Errno> {
         loop {
             clear_screen();
             self.get_cursor_position()?;
             self.refresh_screen();
-            let c = self.read_key()?;
-            if c == b'\x1b' {
-                break Ok(());
+            match self.read_editor_key() {
+                Ok(EditorKey::ArrowLeft) => {
+                    if self.cx != 1 {
+                        self.cx -= 1;
+                    }
+                }
+                Ok(EditorKey::ArrowRight) => {
+                    if self.cx != self.screencols as usize {
+                        self.cx += 1;
+                    }
+                }
+                Ok(EditorKey::ArrowUp) => {
+                    if self.cy != 1 {
+                        self.cy -= 1;
+                    }
+                }
+                Ok(EditorKey::ArrowDown) => {
+                    if self.cy != self.screenrows as usize {
+                        self.cy += 1;
+                    }
+                }
+                Ok(EditorKey::DelKey) => {}
+                Ok(EditorKey::HomeKey) => {
+                    self.cx = 1;
+                }
+                Ok(EditorKey::EndKey) => {
+                    self.cx = self.screencols as usize;
+                }
+                Ok(EditorKey::PageUp) => {}
+                Ok(EditorKey::PageDown) => {}
+                Ok(EditorKey::K(_)) => {}
+                Err(e) => {
+                    return Err(e);
+                }
             }
         }
     }
