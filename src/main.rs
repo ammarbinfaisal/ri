@@ -491,11 +491,11 @@ impl<'editor> EditorConfig<'editor> {
                                 _ => {
                                     if c > 31 && c < 127 {
                                         // insert the character at the cursor position
-                                        // self.cx - self.cx_base is the index of the character in the row
                                         if self.coloff as usize + self.cx - self.cx_base
                                             >= self.rows[self.rowoff as usize + self.cy - 1].len
                                         {
-                                            self.rows[self.rowoff as usize + self.cy - 1].push(c as char);
+                                            self.rows[self.rowoff as usize + self.cy - 1]
+                                                .push(c as char);
                                             self.max_x = max(self.max_x, self.cx);
                                         } else {
                                             self.rows[self.rowoff as usize + self.cy - 1].insert(
