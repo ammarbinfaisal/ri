@@ -58,6 +58,8 @@ enum EditorKey {
     EndKey,
     PageUp,
     PageDown,
+    Backspace,
+    Insert,
     K(u8),
 }
 
@@ -90,6 +92,18 @@ impl EditorRow {
                 self.len -= 1;
             }
         }
+    }
+}
+
+impl std::fmt::Display for EditorMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mode = match self {
+            EditorMode::Normal => "normal",
+            EditorMode::Insert =>  "insert",
+            EditorMode::Command =>  "",
+        };
+        // with background color pink and foreground color white
+        write!(f, "{}", mode)
     }
 }
 
@@ -153,8 +167,8 @@ impl<'editor> EditorConfig<'editor> {
             for _ in l..(self.cx_base - 1) {
                 rowstr = format!(" {}", rowstr.clone());
             }
-            buf.push_str(&rowstr);
             buf.push_str("\x1b[K");
+            buf.push_str(format!("\x1b[K{}", rowstr).as_str());
             if i < row_count {
                 let row = &self.rows[i as usize];
                 let len = row.len;
@@ -174,6 +188,9 @@ impl<'editor> EditorConfig<'editor> {
         buf.push_str("\x1b[H");
         buf.push_str("\x1b[?25h");
         if self.mode == EditorMode::Normal || self.mode == EditorMode::Insert {
+            buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
+            buf.push_str("\x1b[K-- ");
+            buf.push_str(&format!("{} {}", self.mode, self.cmd));
             buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
         } else if self.mode == EditorMode::Command {
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
@@ -241,6 +258,7 @@ impl<'editor> EditorConfig<'editor> {
                         b'1'..=b'8' => match buf[2] {
                             b'~' => match buf[1] {
                                 b'1' => Ok(EditorKey::HomeKey),
+                                b'2' => Ok(EditorKey::Insert),
                                 b'3' => Ok(EditorKey::DelKey),
                                 b'4' => Ok(EditorKey::EndKey),
                                 b'5' => Ok(EditorKey::PageUp),
@@ -261,6 +279,7 @@ impl<'editor> EditorConfig<'editor> {
                     _ => Ok(EditorKey::K(c)),
                 }
             }
+            b'\x7f' => Ok(EditorKey::Backspace),
             _ => Ok(EditorKey::K(c)),
         }
     }
@@ -294,6 +313,15 @@ impl<'editor> EditorConfig<'editor> {
                         .unwrap();
                     self.log.flush().unwrap();
                     match key {
+                        EditorKey::Insert => match self.mode {
+                            EditorMode::Normal => {
+                                self.mode = EditorMode::Insert;
+                            }
+                            EditorMode::Insert => {
+                                self.mode = EditorMode::Normal;
+                            }
+                            EditorMode::Command => {}
+                        },
                         EditorKey::ArrowLeft => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
                                 if self.cx != self.cx_base {
@@ -392,6 +420,20 @@ impl<'editor> EditorConfig<'editor> {
                             self.cy = bottom;
                             self.set_x_after_up_down();
                         }
+                        EditorKey::Backspace => match self.mode {
+                            EditorMode::Insert | EditorMode::Normal => {
+                                if self.cx > self.cx_base {
+                                    self.rows[self.cy - 1].remove(self.cx - self.cx_base - 1);
+                                    self.cx -= 1;
+                                }
+                            }
+                            EditorMode::Command => {
+                                if self.cmdix != 0 {
+                                    self.cmd.remove(self.cmdix - 1);
+                                    self.cmdix -= 1;
+                                }
+                            }
+                        },
                         EditorKey::K(c) => match self.mode {
                             EditorMode::Normal => match c {
                                 b'i' => {
