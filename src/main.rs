@@ -99,12 +99,22 @@ impl std::fmt::Display for EditorMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mode = match self {
             EditorMode::Normal => "normal",
-            EditorMode::Insert =>  "insert",
-            EditorMode::Command =>  "",
+            EditorMode::Insert => "insert",
+            EditorMode::Command => "",
         };
         // with background color pink and foreground color white
         write!(f, "{}", mode)
     }
+}
+
+const neutral_color: &str = "\x1b[0m";
+
+fn bg_color(r: u8, g: u8, b: u8) -> String {
+    format!("\x1b[48;2;{};{};{}m", r, g, b)
+}
+
+fn fg_color(r: u8, g: u8, b: u8) -> String {
+    format!("\x1b[38;2;{};{};{}m", r, g, b)
 }
 
 impl<'editor> EditorConfig<'editor> {
@@ -117,7 +127,7 @@ impl<'editor> EditorConfig<'editor> {
         if contents.chars().last() == Some('\n') {
             rows.push(EditorRow::new(""));
         }
-        let cx_base = rows.len().to_string().len() + 2;
+        let cx_base = rows.len().to_string().len() + 4;
         Self {
             cx: cx_base,
             cy: 1,
@@ -135,7 +145,7 @@ impl<'editor> EditorConfig<'editor> {
             log: file,
             rightted: false,
             cx_base,
-            filename
+            filename,
         }
     }
 
@@ -154,33 +164,48 @@ impl<'editor> EditorConfig<'editor> {
     }
 
     fn refresh_screen(&mut self) {
-        self.set_size();
         clear_screen();
+        self.set_size();
         let mut buf = String::new();
         buf.push_str("\x1b[?25l");
         buf.push_str("\x1b[H");
-        let row_count = self.rows.len() as u16;
-        let rows_to_write = min(self.screenrows - 1, row_count);
-        for i in self.rowoff..(self.rowoff + rows_to_write) {
-            let mut rowstr = format!("{} ", i + 1);
+        let row_count = self.rows.len();
+        let rows_to_write = min(self.screenrows as usize - 1, row_count);
+        for i in (self.rowoff as usize)..(self.rowoff as usize + rows_to_write) {
+            let mut rowstr = format!(" {} ", i + 1);
             let l = rowstr.len();
-            for _ in l..(self.cx_base - 1) {
+            for _ in l..(self.cx_base - 2) {
                 rowstr = format!(" {}", rowstr.clone());
             }
-            buf.push_str("\x1b[K");
-            buf.push_str(format!("\x1b[K{}", rowstr).as_str());
-            if i < row_count {
-                let row = &self.rows[i as usize];
-                let len = row.len;
-                for j in self.coloff as usize..len {
-                    buf.push(row.chars[j]);
-                }
+            buf.push_str(
+                format!(
+                    "\x1b[K{}{}{}",
+                    bg_color(96, 115, 116),
+                    rowstr,
+                    neutral_color
+                )
+                .as_str(),
+            );
+            buf.push_str(&bg_color(250, 238, 209));
+            buf.push_str(fg_color(0, 0, 0).as_str());
+            buf.push_str(" ");
+            let row = &self.rows[i as usize];
+            let len = min(self.screencols as usize, row.len);
+            for j in self.coloff as usize..len {
+                buf.push(row.chars[j]);
+                
             }
+            // blank space to the end of the line
+            let space_count = self.screencols as usize - len + self.coloff as usize - self.cx_base + 1;
+            for _ in 0..space_count {
+                buf.push(' ');
+            }
+            buf.push_str(neutral_color);
             buf.push_str("\r\n");
         }
         // if space is left, fill it with tildes
-        if rows_to_write < self.screenrows - 1 {
-            for _ in rows_to_write..self.screenrows - 1 {
+        if rows_to_write < self.screenrows as usize - 1 {
+            for _ in rows_to_write..self.screenrows as usize - 1 {
                 buf.push_str("\x1b[K~\r\n");
             }
         }
@@ -189,15 +214,38 @@ impl<'editor> EditorConfig<'editor> {
         buf.push_str("\x1b[?25h");
         if self.mode == EditorMode::Normal || self.mode == EditorMode::Insert {
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
-            buf.push_str("\x1b[K-- ");
-            buf.push_str(&format!("{} {}", self.mode, self.cmd));
-            buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
+            buf.push_str("\x1b[K");
+            // "-" * self.cx_base
+            let dashes = "-".repeat(self.cx_base - 2);
+            // B2A59B
+            buf.push_str(&format!(
+                "{}",
+                bg_color(96, 115, 116),
+            ));
+            buf.push_str(&dashes);
+            buf.push_str(neutral_color);
+            buf.push_str(&format!(
+                "{}",
+                bg_color(178, 165, 155),
+            ));
+            let mode = self.mode.to_string();
+            buf.push_str(&mode);
+            for _ in 0..self.screencols as usize - self.cx_base - mode.len() {
+                buf.push(' ');
+            }
+            buf.push_str(neutral_color);
         } else if self.mode == EditorMode::Command {
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
+            buf.push_str(&format!(
+                "{}",
+                bg_color(178, 165, 155),
+            ));
             buf.push_str("\x1b[K: ");
             buf.push_str(&self.cmd);
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, self.cmdix + 3,));
+            buf.push_str(neutral_color);
         }
+        buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
         io::write(self.stdout, buf.as_bytes()).unwrap();
     }
 
@@ -452,8 +500,10 @@ impl<'editor> EditorConfig<'editor> {
                                     if c > 31 && c < 127 {
                                         // insert the character at the cursor position
                                         // self.cx - self.cx_base is the index of the character in the row
-                                        self.rows[self.rowoff as usize + self.cy - 1]
-                                            .insert(self.rowoff as usize + self.cx - self.cx_base, c as char);
+                                        self.rows[self.rowoff as usize + self.cy - 1].insert(
+                                            self.rowoff as usize + self.cx - self.cx_base,
+                                            c as char,
+                                        );
                                         self.cx += 1;
                                         self.max_x = max(self.max_x, self.cx);
                                     }
@@ -470,10 +520,18 @@ impl<'editor> EditorConfig<'editor> {
                                             return Ok(());
                                         }
                                         "w" => {
-                                            let mut file = File::create(format!("{}.t", self.filename)).unwrap();
-                                            for ix in 0..self.rows.len()-1 {
+                                            let mut file =
+                                                File::create(format!("{}.t", self.filename))
+                                                    .unwrap();
+                                            for ix in 0..self.rows.len() - 1 {
                                                 let row = &self.rows[ix];
-                                                file.write_all(&row.chars.iter().collect::<String>().as_bytes()).unwrap();
+                                                file.write_all(
+                                                    &row.chars
+                                                        .iter()
+                                                        .collect::<String>()
+                                                        .as_bytes(),
+                                                )
+                                                .unwrap();
                                                 file.write_all("\n".as_bytes()).unwrap();
                                             }
                                         }
