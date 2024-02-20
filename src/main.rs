@@ -93,6 +93,11 @@ impl EditorRow {
             }
         }
     }
+
+    fn push(&mut self, c: char) {
+        self.chars.push(c);
+        self.len += 1;
+    }
 }
 
 impl std::fmt::Display for EditorMode {
@@ -487,13 +492,10 @@ impl<'editor> EditorConfig<'editor> {
                                     if c > 31 && c < 127 {
                                         // insert the character at the cursor position
                                         // self.cx - self.cx_base is the index of the character in the row
-                                        if self.cx - self.cx_base
-                                            == self.rows[self.rowoff as usize + self.cy - 1].len
+                                        if self.coloff as usize + self.cx - self.cx_base
+                                            >= self.rows[self.rowoff as usize + self.cy - 1].len
                                         {
-                                            self.rows[self.rowoff as usize + self.cy - 1]
-                                                .chars
-                                                .push(c as char);
-                                            self.cx += 1;
+                                            self.rows[self.rowoff as usize + self.cy - 1].push(c as char);
                                             self.max_x = max(self.max_x, self.cx);
                                         } else {
                                             self.rows[self.rowoff as usize + self.cy - 1].insert(
