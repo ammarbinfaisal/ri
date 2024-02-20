@@ -191,16 +191,21 @@ impl<'editor> EditorConfig<'editor> {
             buf.push_str(&blackfg);
             buf.push_str(" ");
             let row = &self.rows[i as usize];
-            let len = min(self.screencols as usize, row.len);
+            let len = min(
+                self.screencols as usize - self.cx_base + self.coloff as usize,
+                row.len,
+            ) as usize;
             for j in self.coloff as usize..len {
                 buf.push(row.chars[j]);
             }
             // blank space to the end of the line
-            let space_count =
-                self.screencols as usize - len + self.coloff as usize - self.cx_base + 1;
-            for _ in 0..space_count {
-                buf.push(' ');
-            }
+            let subbed = if len > 0 && len > self.coloff as usize {
+                len - self.coloff as usize
+            } else {
+                0
+            };
+            let space_count = self.screencols as usize - self.cx_base - subbed;
+            buf.push_str(" ".repeat(space_count).as_str());
             buf.push_str(NEUTRAL_COLOR);
             buf.push_str("\r\n");
         }
@@ -364,7 +369,11 @@ impl<'editor> EditorConfig<'editor> {
                         },
                         EditorKey::ArrowLeft => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                if self.cx != self.cx_base {
+                                if self.cx == self.cx_base {
+                                    if self.coloff > 0 {
+                                        self.coloff -= 1;
+                                    }
+                                } else {
                                     self.cx -= 1;
                                     self.max_x = self.cx;
                                 }
@@ -379,11 +388,19 @@ impl<'editor> EditorConfig<'editor> {
                         },
                         EditorKey::ArrowRight => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                let rightlim = self.curr_right_limit() + self.cx_base;
-                                if self.cx < rightlim {
-                                    self.cx += 1;
+                                if self.cx == self.screencols as usize
+                                    && (self.cx - self.cx_base + self.coloff as usize)
+                                        < self.rows[self.rowoff as usize + self.cy - 1].len
+                                {
+                                    self.log.write_all("at right\n".as_bytes()).unwrap();
+                                    self.coloff += 1;
                                 } else {
-                                    self.cx = rightlim;
+                                    let rightlim = self.curr_right_limit() + self.cx_base;
+                                    if self.cx < rightlim {
+                                        self.cx += 1;
+                                    } else {
+                                        self.cx = rightlim;
+                                    }
                                 }
                                 self.max_x = self.cx;
                             }
@@ -431,11 +448,26 @@ impl<'editor> EditorConfig<'editor> {
                             EditorMode::Command => {}
                         },
                         EditorKey::HomeKey => {
+                            self.coloff = 0;
                             self.cx = self.cx_base;
                             self.max_x = self.cx;
+                            self.rightted = false;
                         }
                         EditorKey::EndKey => {
-                            self.cx = self.curr_right_limit() + self.cx_base;
+                            if self.screencols as usize - self.cx_base
+                                < self.rows[self.rowoff as usize + self.cy - 1].len
+                            {
+                                // such that the cursor is at the end of the screen
+                                self.coloff = (self.rows[self.rowoff as usize + self.cy - 1].len
+                                    - (self.screencols as usize - self.cx_base)) as u16;
+                                self.cx = self.screencols as usize;
+                            } else {
+                                self.cx = min(
+                                    self.cx_base
+                                        + self.rows[self.rowoff as usize + self.cy - 1].len,
+                                    self.screencols as usize,
+                                );
+                            }
                             self.max_x = self.cx;
                             self.rightted = true;
                         }
