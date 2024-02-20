@@ -38,6 +38,7 @@ struct EditorConfig<'a> {
     mode: EditorMode,
     cx_base: usize,
     log: File,
+    filename: &'a str,
 }
 
 #[derive(Debug)]
@@ -93,7 +94,7 @@ impl EditorRow {
 }
 
 impl<'editor> EditorConfig<'editor> {
-    fn new(contents: &str) -> Self {
+    fn new(contents: &str, filename: &'editor str) -> Self {
         let file = File::create("log").unwrap();
         let mut rows = contents
             .lines()
@@ -120,6 +121,7 @@ impl<'editor> EditorConfig<'editor> {
             log: file,
             rightted: false,
             cx_base,
+            filename
         }
     }
 
@@ -409,7 +411,7 @@ impl<'editor> EditorConfig<'editor> {
                                         // insert the character at the cursor position
                                         // self.cx - self.cx_base is the index of the character in the row
                                         self.rows[self.rowoff as usize + self.cy - 1]
-                                            .insert(self.cx - self.cx_base, c as char);
+                                            .insert(self.rowoff as usize + self.cx - self.cx_base, c as char);
                                         self.cx += 1;
                                         self.max_x = max(self.max_x, self.cx);
                                     }
@@ -424,6 +426,14 @@ impl<'editor> EditorConfig<'editor> {
                                     match self.cmd.as_str() {
                                         "q" => {
                                             return Ok(());
+                                        }
+                                        "w" => {
+                                            let mut file = File::create(format!("{}.t", self.filename)).unwrap();
+                                            for ix in 0..self.rows.len()-1 {
+                                                let row = &self.rows[ix];
+                                                file.write_all(&row.chars.iter().collect::<String>().as_bytes()).unwrap();
+                                                file.write_all("\n".as_bytes()).unwrap();
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -472,8 +482,8 @@ fn main() {
             exit(1);
         }
     };
-    let contents = std::fs::read_to_string(file).unwrap();
-    let mut editor = EditorConfig::new(&contents);
+    let contents = std::fs::read_to_string(file.clone()).unwrap();
+    let mut editor = EditorConfig::new(&contents, &file);
     loop {
         let res = editor.run();
         disable_raw_mode(&old_termios);
