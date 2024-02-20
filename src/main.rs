@@ -408,7 +408,7 @@ impl<'editor> EditorConfig<'editor> {
                                     if c > 31 && c < 127 {
                                         // insert the character at the cursor position
                                         // self.cx - self.cx_base is the index of the character in the row
-                                        self.rows[self.cy - 1]
+                                        self.rows[self.rowoff as usize + self.cy - 1]
                                             .insert(self.cx - self.cx_base, c as char);
                                         self.cx += 1;
                                         self.max_x = max(self.max_x, self.cx);
