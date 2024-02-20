@@ -169,6 +169,10 @@ impl<'editor> EditorConfig<'editor> {
         let mut buf = String::new();
         buf.push_str("\x1b[?25l");
         buf.push_str("\x1b[H");
+        let textbg = bg_color(250, 238, 209);
+        let blackfg = fg_color(0, 0, 0);
+        let linenobg = bg_color(96, 115, 116);
+        let cmdbg = bg_color(178, 165, 155);
         let row_count = self.rows.len();
         let rows_to_write = min(self.screenrows as usize - 1, row_count);
         for i in (self.rowoff as usize)..(self.rowoff as usize + rows_to_write) {
@@ -180,7 +184,7 @@ impl<'editor> EditorConfig<'editor> {
             buf.push_str(
                 format!(
                     "\x1b[K{}{}{}",
-                    bg_color(96, 115, 116),
+                    linenobg,
                     rowstr,
                     neutral_color
                 )
@@ -220,13 +224,13 @@ impl<'editor> EditorConfig<'editor> {
             // B2A59B
             buf.push_str(&format!(
                 "{}",
-                bg_color(96, 115, 116),
+                linenobg
             ));
             buf.push_str(&dashes);
             buf.push_str(neutral_color);
             buf.push_str(&format!(
                 "{}",
-                bg_color(178, 165, 155),
+                cmdbg,
             ));
             let mode = self.mode.to_string();
             buf.push_str(&mode);
@@ -238,7 +242,7 @@ impl<'editor> EditorConfig<'editor> {
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
             buf.push_str(&format!(
                 "{}",
-                bg_color(178, 165, 155),
+                cmdbg,
             ));
             buf.push_str("\x1b[K: ");
             buf.push_str(&self.cmd);
