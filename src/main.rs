@@ -107,7 +107,7 @@ impl std::fmt::Display for EditorMode {
     }
 }
 
-const neutral_color: &str = "\x1b[0m";
+const NEUTRAL_COLOR: &str = "\x1b[0m";
 
 fn bg_color(r: u8, g: u8, b: u8) -> String {
     format!("\x1b[48;2;{};{};{}m", r, g, b)
@@ -181,30 +181,22 @@ impl<'editor> EditorConfig<'editor> {
             for _ in l..(self.cx_base - 2) {
                 rowstr = format!(" {}", rowstr.clone());
             }
-            buf.push_str(
-                format!(
-                    "\x1b[K{}{}{}",
-                    linenobg,
-                    rowstr,
-                    neutral_color
-                )
-                .as_str(),
-            );
-            buf.push_str(&bg_color(250, 238, 209));
-            buf.push_str(fg_color(0, 0, 0).as_str());
+            buf.push_str(format!("\x1b[K{}{}{}", linenobg, rowstr, NEUTRAL_COLOR).as_str());
+            buf.push_str(&textbg);
+            buf.push_str(&blackfg);
             buf.push_str(" ");
             let row = &self.rows[i as usize];
             let len = min(self.screencols as usize, row.len);
             for j in self.coloff as usize..len {
                 buf.push(row.chars[j]);
-                
             }
             // blank space to the end of the line
-            let space_count = self.screencols as usize - len + self.coloff as usize - self.cx_base + 1;
+            let space_count =
+                self.screencols as usize - len + self.coloff as usize - self.cx_base + 1;
             for _ in 0..space_count {
                 buf.push(' ');
             }
-            buf.push_str(neutral_color);
+            buf.push_str(NEUTRAL_COLOR);
             buf.push_str("\r\n");
         }
         // if space is left, fill it with tildes
@@ -222,32 +214,23 @@ impl<'editor> EditorConfig<'editor> {
             // "-" * self.cx_base
             let dashes = "-".repeat(self.cx_base - 2);
             // B2A59B
-            buf.push_str(&format!(
-                "{}",
-                linenobg
-            ));
+            buf.push_str(&format!("{}", linenobg));
             buf.push_str(&dashes);
-            buf.push_str(neutral_color);
-            buf.push_str(&format!(
-                "{}",
-                cmdbg,
-            ));
+            buf.push_str(NEUTRAL_COLOR);
+            buf.push_str(&format!("{}", cmdbg,));
             let mode = self.mode.to_string();
             buf.push_str(&mode);
             for _ in 0..self.screencols as usize - self.cx_base - mode.len() {
                 buf.push(' ');
             }
-            buf.push_str(neutral_color);
+            buf.push_str(NEUTRAL_COLOR);
         } else if self.mode == EditorMode::Command {
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, 1,));
-            buf.push_str(&format!(
-                "{}",
-                cmdbg,
-            ));
+            buf.push_str(&format!("{}", cmdbg,));
             buf.push_str("\x1b[K: ");
             buf.push_str(&self.cmd);
             buf.push_str(&format!("\x1b[{};{}H", self.screenrows, self.cmdix + 3,));
-            buf.push_str(neutral_color);
+            buf.push_str(NEUTRAL_COLOR);
         }
         buf.push_str(&format!("\x1b[{};{}H", self.cy, self.cx));
         io::write(self.stdout, buf.as_bytes()).unwrap();
@@ -504,10 +487,20 @@ impl<'editor> EditorConfig<'editor> {
                                     if c > 31 && c < 127 {
                                         // insert the character at the cursor position
                                         // self.cx - self.cx_base is the index of the character in the row
-                                        self.rows[self.rowoff as usize + self.cy - 1].insert(
-                                            self.rowoff as usize + self.cx - self.cx_base,
-                                            c as char,
-                                        );
+                                        if self.cx - self.cx_base
+                                            == self.rows[self.rowoff as usize + self.cy - 1].len
+                                        {
+                                            self.rows[self.rowoff as usize + self.cy - 1]
+                                                .chars
+                                                .push(c as char);
+                                            self.cx += 1;
+                                            self.max_x = max(self.max_x, self.cx);
+                                        } else {
+                                            self.rows[self.rowoff as usize + self.cy - 1].insert(
+                                                self.rowoff as usize + self.cx - self.cx_base,
+                                                c as char,
+                                            );
+                                        }
                                         self.cx += 1;
                                         self.max_x = max(self.max_x, self.cx);
                                     }
