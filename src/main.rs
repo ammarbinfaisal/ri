@@ -9,7 +9,7 @@ use rustix::{
     stdio,
     termios::tcgetwinsize,
 };
-use std::cmp::{min, max};
+use std::cmp::{max, min};
 
 #[derive(PartialEq, Debug)]
 enum EditorMode {
@@ -29,10 +29,21 @@ struct EditorConfig<'a> {
     stdin: BorrowedFd<'a>,
     rowoff: u16,
     coloff: u16,
-    rows: Vec<String>,
+    /// true when END has been pressed
+    /// and left/HOME key hasn't been pressed
+    rightted: bool,
+    rows: Vec<EditorRow>,
     cmd: String,
     cmdix: usize,
     mode: EditorMode,
+    cx_base: usize,
+    log: File,
+}
+
+#[derive(Debug)]
+struct EditorRow {
+    chars: Vec<char>,
+    len: usize,
 }
 
 #[derive(PartialEq, Debug)]
@@ -49,24 +60,66 @@ enum EditorKey {
     K(u8),
 }
 
-const CX_INIT: usize = 4;
+impl EditorRow {
+    fn new(s: &str) -> Self {
+        Self {
+            chars: s.chars().collect(),
+            len: s.len(),
+        }
+    }
+
+    fn remove(&mut self, ix: usize) {
+        if ix < self.len {
+            self.chars.remove(ix);
+            self.len -= 1;
+        }
+    }
+
+    fn insert(&mut self, ix: usize, c: char) {
+        if ix < self.len {
+            self.chars.insert(ix, c);
+            self.len += 1;
+        }
+    }
+
+    fn pop(&mut self) {
+        if self.len > 0 {
+            self.chars.pop();
+            if self.len > 0 {
+                self.len -= 1;
+            }
+        }
+    }
+}
 
 impl<'editor> EditorConfig<'editor> {
     fn new(contents: &str) -> Self {
+        let file = File::create("log").unwrap();
+        let mut rows = contents
+            .lines()
+            .map(|s| EditorRow::new(s))
+            .collect::<Vec<_>>();
+        if contents.chars().last() == Some('\n') {
+            rows.push(EditorRow::new(""));
+        }
+        let cx_base = rows.len().to_string().len() + 2;
         Self {
-            cx: CX_INIT,
+            cx: cx_base,
             cy: 1,
-            max_x: CX_INIT,
+            max_x: cx_base,
             screenrows: 0,
             screencols: 0,
             stdout: stdio::stdout(),
             stdin: stdio::stdin(),
             mode: EditorMode::Normal,
             cmd: String::new(),
-            rows: contents.split("\n").map(|s| s.to_string()).collect(),
+            rows,
             rowoff: 0,
             coloff: 0,
             cmdix: 0,
+            log: file,
+            rightted: false,
+            cx_base,
         }
     }
 
@@ -86,23 +139,36 @@ impl<'editor> EditorConfig<'editor> {
 
     fn refresh_screen(&mut self) {
         self.set_size();
+        clear_screen();
         let mut buf = String::new();
         buf.push_str("\x1b[?25l");
         buf.push_str("\x1b[H");
         let row_count = self.rows.len() as u16;
-        for i in self.rowoff..self.screenrows {
-            buf.push_str(format!("{:2} ", i + 1).as_str());
+        let rows_to_write = min(self.screenrows - 1, row_count);
+        for i in self.rowoff..(self.rowoff + rows_to_write) {
+            let mut rowstr = format!("{} ", i + 1);
+            let l = rowstr.len();
+            for _ in l..(self.cx_base - 1) {
+                rowstr = format!(" {}", rowstr.clone());
+            }
+            buf.push_str(&rowstr);
             buf.push_str("\x1b[K");
-            if i < self.screenrows - 1 {
-                if i < row_count {
-                    let row = self.rows[i as usize].clone();
-                    if (self.coloff as usize) < row.len() {
-                        buf.push_str(&row[self.coloff as usize..]);
-                    }
+            if i < row_count {
+                let row = &self.rows[i as usize];
+                let len = row.len;
+                for j in self.coloff as usize..len {
+                    buf.push(row.chars[j]);
                 }
-                buf.push_str("\r\n");
+            }
+            buf.push_str("\r\n");
+        }
+        // if space is left, fill it with tildes
+        if rows_to_write < self.screenrows - 1 {
+            for _ in rows_to_write..self.screenrows - 1 {
+                buf.push_str("\x1b[K~\r\n");
             }
         }
+        // move the cursor to the bottom of the screen
         buf.push_str("\x1b[H");
         buf.push_str("\x1b[?25h");
         if self.mode == EditorMode::Normal || self.mode == EditorMode::Insert {
@@ -120,7 +186,7 @@ impl<'editor> EditorConfig<'editor> {
         io::write(self.stdout, "\x1b[999C\x1b[999B".as_bytes()).unwrap();
         let mut buf = [0u8; 32];
         io::read(self.stdin, &mut buf).unwrap();
-        let mut cx = CX_INIT;
+        let mut cx = self.cx_base;
         let mut cy = 1;
         let mut i = 0;
         while i < buf.len() {
@@ -198,43 +264,42 @@ impl<'editor> EditorConfig<'editor> {
     }
 
     fn curr_right_limit(&self) -> usize {
-        let lim = if self.mode == EditorMode::Insert {
-            0 as i64
-        } else {
-            -1
-        };
-        let res = (min(self.screencols as usize, self.rows[self.cy - 1].len())) as i64 + lim;
-        if res < 0 {
-            0
-        } else {
-            res as usize
-        }
+        min(
+            self.screencols as usize,
+            self.rows[self.rowoff as usize + self.cy - 1].len,
+        )
     }
 
-    fn set_cx(&mut self) {
-        if self.cx < self.curr_right_limit() + CX_INIT {
+    fn set_x_after_up_down(&mut self) {
+        let rightlim = self.curr_right_limit();
+        if self.rightted {
+            self.cx = rightlim + self.cx_base;
+        } else if self.max_x < rightlim + self.cx_base {
             self.cx = self.max_x;
         } else {
-            self.cx = self.curr_right_limit() + CX_INIT;
+            self.cx = rightlim + self.cx_base;
         }
     }
 
     fn run<'a>(&mut self) -> Result<(), Errno> {
         // open a log file
-        let mut file = File::create("log").unwrap();
         loop {
             self.refresh_screen();
             match self.read_editor_key() {
                 Ok(key) => {
-                    file.write_all(&format!("{:?}\n", key).as_bytes()).unwrap();
-                    file.flush().unwrap();
+                    self.log
+                        .write_all(&format!("{:?}\n", key).as_bytes())
+                        .unwrap();
+                    self.log.flush().unwrap();
                     match key {
                         EditorKey::ArrowLeft => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                if self.cx != CX_INIT {
+                                if self.cx != self.cx_base {
                                     self.cx -= 1;
                                     self.max_x = self.cx;
                                 }
+                                self.max_x = self.cx;
+                                self.rightted = false;
                             }
                             EditorMode::Command => {
                                 if self.cmdix != 0 {
@@ -244,12 +309,13 @@ impl<'editor> EditorConfig<'editor> {
                         },
                         EditorKey::ArrowRight => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                if self.cx - CX_INIT < self.curr_right_limit() {
+                                let rightlim = self.curr_right_limit() + self.cx_base;
+                                if self.cx < rightlim {
                                     self.cx += 1;
                                 } else {
-                                    self.cx = self.curr_right_limit() + CX_INIT;
+                                    self.cx = rightlim;
                                 }
-                                self.max_x = max(self.max_x, self.cx);
+                                self.max_x = self.cx;
                             }
                             EditorMode::Command => {
                                 if self.cmdix != self.cmd.len() {
@@ -259,56 +325,70 @@ impl<'editor> EditorConfig<'editor> {
                         },
                         EditorKey::ArrowUp => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                if self.cy != 1 {
+                                if self.cy == 1 {
+                                    if self.rowoff > 0 {
+                                        self.rowoff -= 1;
+                                    }
+                                } else {
                                     self.cy -= 1;
                                 }
-                                self.set_cx();
+                                self.set_x_after_up_down();
                             }
                             EditorMode::Command => {}
                         },
                         EditorKey::ArrowDown => match self.mode {
                             EditorMode::Normal | EditorMode::Insert => {
-                                if self.cy != self.screenrows as usize - 1 {
+                                if self.cy + 1 == self.screenrows as usize {
+                                    if (self.cy + self.rowoff as usize) < self.rows.len() {
+                                        self.rowoff += 1;
+                                    }
+                                } else if self.cy < self.screenrows as usize - 1 {
                                     self.cy += 1;
                                 }
-                                self.set_cx();
+                                self.set_x_after_up_down();
                             }
                             EditorMode::Command => {}
                         },
                         EditorKey::DelKey => match self.mode {
                             EditorMode::Insert | EditorMode::Normal => {
-                                // handles the case where the cursor is at the end of the line
-                                // if mode is insert, the cursor is can be past the last character
-                                // if mode is normal, the cursor is always on a character
-                                if (self.cx - CX_INIT) == self.curr_right_limit() {
+                                if (self.cx - self.cx_base) == self.curr_right_limit() {
                                     self.rows[self.cy - 1].pop();
                                     self.cx -= 1;
-                                } else {
-                                    self.rows[self.cy - 1].remove(self.cx - CX_INIT);
+                                } else if self.cx >= self.cx_base {
+                                    self.rows[self.cy - 1].remove(self.cx - self.cx_base);
                                 }
                             }
                             EditorMode::Command => {}
                         },
                         EditorKey::HomeKey => {
-                            self.cx = CX_INIT;
+                            self.cx = self.cx_base;
+                            self.max_x = self.cx;
                         }
                         EditorKey::EndKey => {
-                            self.cx = self.curr_right_limit() + CX_INIT;
+                            self.cx = self.curr_right_limit() + self.cx_base;
+                            self.max_x = self.cx;
+                            self.rightted = true;
                         }
                         EditorKey::PageUp => {
-                            if self.cy > self.screenrows as usize {
-                                self.cy -= self.screenrows as usize;
+                            let row_offset = self.screenrows as usize - self.cy - 1;
+                            if self.rowoff > row_offset as u16 {
+                                self.rowoff -= row_offset as u16 + 1;
                             } else {
-                                self.cy = 1;
+                                self.rowoff = 0;
                             }
+                            self.cy = 1;
+                            self.set_x_after_up_down();
                         }
                         EditorKey::PageDown => {
-                            // TODO: support scrolling
-                            if (self.cy + self.screenrows as usize) < self.rows.len() {
-                                self.cy += self.screenrows as usize;
+                            let row_count = self.rows.len();
+                            let bottom = self.screenrows as usize - 1;
+                            if ((self.rowoff) as usize + self.cy - 1 + bottom) < self.rows.len() {
+                                self.rowoff += self.cy as u16;
                             } else {
-                                self.cy = self.rows.len();
+                                self.rowoff = (row_count - self.cy) as u16;
                             }
+                            self.cy = bottom;
+                            self.set_x_after_up_down();
                         }
                         EditorKey::K(c) => match self.mode {
                             EditorMode::Normal => match c {
@@ -326,7 +406,10 @@ impl<'editor> EditorConfig<'editor> {
                                 }
                                 _ => {
                                     if c > 31 && c < 127 {
-                                        self.rows[self.cy - 1].insert(self.cx - CX_INIT, c as char);
+                                        // insert the character at the cursor position
+                                        // self.cx - self.cx_base is the index of the character in the row
+                                        self.rows[self.cy - 1]
+                                            .insert(self.cx - self.cx_base, c as char);
                                         self.cx += 1;
                                         self.max_x = max(self.max_x, self.cx);
                                     }
