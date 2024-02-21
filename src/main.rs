@@ -330,20 +330,34 @@ impl<'editor> EditorConfig<'editor> {
     }
 
     fn curr_right_limit(&self) -> usize {
+        let len = self.rows[self.rowoff as usize + self.cy - 1].len;
         min(
             self.screencols as usize,
-            self.rows[self.rowoff as usize + self.cy - 1].len,
+            len + self.cx_base - self.coloff as usize,
         )
     }
 
     fn set_x_after_up_down(&mut self) {
+        let len = self.rows[self.rowoff as usize + self.cy - 1].len;
         let rightlim = self.curr_right_limit();
-        if self.rightted {
-            self.cx = rightlim + self.cx_base;
-        } else if self.max_x < rightlim + self.cx_base {
+        if len < self.coloff as usize {
+            self.log
+                .write_all(format!("len: {}\n", len).as_bytes())
+                .unwrap();
+            self.log
+                .write_all(format!("coloff: {}\n", self.coloff).as_bytes())
+                .unwrap();
+            self.log.flush().unwrap();
+            self.coloff = len as u16;
+            self.cx = self.cx_base;
+        } else if !self.rightted && self.max_x < rightlim {
             self.cx = self.max_x;
         } else {
-            self.cx = rightlim + self.cx_base;
+            self.log
+                .write_all(format!("rightlim: {}\n", rightlim).as_bytes())
+                .unwrap();
+            self.log.flush().unwrap();
+            self.cx = rightlim;
         }
     }
 
@@ -395,7 +409,7 @@ impl<'editor> EditorConfig<'editor> {
                                     self.log.write_all("at right\n".as_bytes()).unwrap();
                                     self.coloff += 1;
                                 } else {
-                                    let rightlim = self.curr_right_limit() + self.cx_base;
+                                    let rightlim = self.curr_right_limit();
                                     if self.cx < rightlim {
                                         self.cx += 1;
                                     } else {
@@ -438,7 +452,9 @@ impl<'editor> EditorConfig<'editor> {
                         },
                         EditorKey::DelKey => match self.mode {
                             EditorMode::Insert | EditorMode::Normal => {
-                                if (self.cx - self.cx_base) == self.curr_right_limit() {
+                                if (self.cx + self.coloff as usize - self.cx_base)
+                                    == self.curr_right_limit()
+                                {
                                     self.rows[self.cy - 1].pop();
                                     self.cx -= 1;
                                 } else if self.cx >= self.cx_base {
@@ -459,7 +475,8 @@ impl<'editor> EditorConfig<'editor> {
                             {
                                 // such that the cursor is at the end of the screen
                                 self.coloff = (self.rows[self.rowoff as usize + self.cy - 1].len
-                                    - (self.screencols as usize - self.cx_base)) as u16;
+                                    - (self.screencols as usize - self.cx_base))
+                                    as u16;
                                 self.cx = self.screencols as usize;
                             } else {
                                 self.cx = min(
