@@ -204,7 +204,7 @@ impl<'editor> EditorConfig<'editor> {
             } else {
                 0
             };
-            let space_count = self.screencols as usize - self.cx_base - subbed;
+            let space_count = self.screencols as usize - self.cx_base - subbed + 1;
             buf.push_str(" ".repeat(space_count).as_str());
             buf.push_str(NEUTRAL_COLOR);
             buf.push_str("\r\n");
@@ -230,7 +230,7 @@ impl<'editor> EditorConfig<'editor> {
             buf.push_str(&format!("{}", cmdbg,));
             let mode = self.mode.to_string();
             buf.push_str(&mode);
-            for _ in 0..self.screencols as usize - self.cx_base - mode.len() {
+            for _ in 0..self.screencols as usize - self.cx_base - mode.len() + 2 {
                 buf.push(' ');
             }
             buf.push_str(NEUTRAL_COLOR);
